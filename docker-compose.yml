@@ -5,7 +5,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: tickets
     command: ["postgres", "-c", "max_connections=300"]
-    ports: ["5432:5432"]
+    # Reachable from this machine only, not from the rest of the network.
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - ./scripts/create-test-db.sql:/docker-entrypoint-initdb.d/create-test-db.sql:ro
     healthcheck:
@@ -19,7 +20,9 @@ services:
       db: { condition: service_healthy }
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/tickets
-      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET to at least 32 characters}
+      # Not marked required here: Compose would then refuse to start the db
+      # service alone. The server itself refuses to start without a valid secret.
+      AUTH_SECRET: ${AUTH_SECRET:-}
       DB_POOL_SIZE: "40"
       PAYMENT_DECLINE_RATE: "0.1"
       PAYMENT_LATENCY_MS: "50"

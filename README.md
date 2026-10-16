@@ -74,14 +74,25 @@ All configuration comes from environment variables; nothing has a default that p
 | `POSTGRES_PASSWORD` | Docker Compose | |
 | `PAYMENT_DECLINE_RATE`, `PAYMENT_TIMEOUT_RATE`, `PAYMENT_LATENCY_MS` | server | Make the fake payment provider flaky |
 
-```bash
-export POSTGRES_PASSWORD=$(openssl rand -hex 16)
-export AUTH_SECRET=$(openssl rand -hex 32)
-export DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets
-export TEST_DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets_test
-export API_URL=http://localhost:3000
+Generate the secrets once into `.env`. It's git-ignored, and Docker Compose reads it automatically. Postgres only reads its password the first time it starts, so keep this file; if you lose it, reset the database with `docker compose down -v`.
 
-docker compose up -d db          # Postgres on :5432, creates tickets and tickets_test
+```bash
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+cat > .env <<EOF
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+AUTH_SECRET=$(openssl rand -hex 32)
+DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets
+TEST_DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets_test
+API_URL=http://localhost:3000
+EOF
+```
+
+Then, in each terminal:
+
+```bash
+set -a; source .env; set +a      # load .env into this shell
+
+docker compose up -d db          # Postgres on localhost:5432, creates tickets and tickets_test
 npm install
 npm test                         # 42 tests, including race and auth tests
 npm run bench                    # locking strategy benchmark
@@ -90,6 +101,7 @@ npm run race -- 3000 100         # spike test in another terminal, then checks i
 ```
 
 Or run everything in Docker: `docker compose up --build`.
+
 ## Project layout
 
 ```

@@ -1,15 +1,23 @@
 // Spike test over HTTP against a running server, followed by an invariant check.
 // Usage: npm run race -- <buyers> <seats>
+import { randomUUID } from "node:crypto";
 import { loadAuthSecret, signToken } from "../src/auth.js";
 import { createPool } from "../src/db.js";
 import { checkInvariants } from "../src/invariants.js";
 
+function positiveInt(value: string | undefined, fallback: number, name: string) {
+  const n = Number(value ?? fallback);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name} must be a positive integer, got "${value}"`);
+  return n;
+}
+
 const BASE = process.env.API_URL;
 if (!BASE) throw new Error("API_URL is not set");
 const authSecret = loadAuthSecret();
-const buyers = Number(process.argv[2] ?? 2000);
-const seatCount = Number(process.argv[3] ?? 100);
-const CONCURRENCY = Number(process.env.CONCURRENCY ?? 200);
+const buyers = positiveInt(process.argv[2], 2000, "buyers");
+const seatCount = positiveInt(process.argv[3], 100, "seats");
+const CONCURRENCY = positiveInt(process.env.CONCURRENCY, 200, "CONCURRENCY");
+const db = createPool();
 
 async function post(path: string, body: unknown, headers: Record<string, string> = {}) {
   const start = performance.now();
@@ -23,13 +31,23 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 }
 
 const adminToken = await signToken(authSecret, "race-admin", "admin");
-const event = await post("/events", { name: "Spike Test", priceCents: 12000, seatCount }, {
+// A unique name lets us find this exact event in the database below.
+const eventName = `Spike Test ${randomUUID()}`;
+const event = await post("/events", { name: eventName, priceCents: 12000, seatCount }, {
   authorization: `Bearer ${adminToken}`,
 });
 if (event.status !== 201) {
   throw new Error(`Could not create event (${event.status}): ${JSON.stringify(event.json)}`);
 }
 const eventId = event.json.id;
+
+// Without this, pointing DATABASE_URL at the wrong database would make the
+// invariant check pass against data this run never touched.
+const { rowCount } = await db.query("SELECT 1 FROM events WHERE id = $1 AND name = $2", [eventId, eventName]);
+if (!rowCount) {
+  throw new Error("DATABASE_URL is not the database the server at API_URL is using");
+}
+
 const firstSeat = Number((await (await fetch(`${BASE}/events/${eventId}/seats`)).json()).seats[0].id);
 
 const latencies: number[] = [];
@@ -65,14 +83,37 @@ await Promise.all(
 );
 const seconds = (performance.now() - start) / 1000;
 
-latencies.sort((a, b) => a - b);
-const pct = (p: number) => Math.round(latencies[Math.min(latencies.length - 1, Math.floor((p / 100) * latencies.length))]);
 console.log(`\n${buyers} buyers, ${seatCount} seats, ${CONCURRENCY} in flight, ${seconds.toFixed(1)}s`);
-console.log(`${Math.round(latencies.length / seconds)} req/s   p50 ${pct(50)}ms   p95 ${pct(95)}ms   p99 ${pct(99)}ms\n`);
+if (latencies.length) {
+  latencies.sort((a, b) => a - b);
+  const pct = (p: number) => Math.round(latencies[Math.min(latencies.length - 1, Math.floor((p / 100) * latencies.length))]);
+  console.log(`${Math.round(latencies.length / seconds)} req/s   p50 ${pct(50)}ms   p95 ${pct(95)}ms   p99 ${pct(99)}ms\n`);
+} else {
+  console.log("No requests completed\n");
+}
 console.table(Object.fromEntries(Object.entries(outcomes).sort()));
 
-const db = createPool();
+const { rows } = await db.query(
+  `SELECT (SELECT count(*) FROM seats WHERE event_id = $1 AND status = 'sold')::int AS sold_seats,
+          count(o.id)::int AS orders,
+          coalesce(sum(o.amount_cents), 0)::int AS revenue_cents
+   FROM holds h JOIN orders o ON o.hold_id = h.id
+   WHERE h.event_id = $1`,
+  [eventId],
+);
+const run = rows[0];
 const result = await checkInvariants(db);
 await db.end();
-console.log(result.ok ? "Invariants: all hold" : "INVARIANT VIOLATIONS", result.ok ? "" : result.violations, result.stats);
-process.exit(result.ok ? 0 : 1);
+
+console.log("This run:", run);
+// Payments that timed out can still be confirmed later by the sweeper, so more
+// orders than 201s is fine. Fewer means a buyer was told they paid with no order.
+const confirmed = outcomes["checkout 201"] ?? 0;
+const missingOrders = run.orders < confirmed;
+if (missingOrders) console.error(`MISSING ORDERS: ${confirmed} checkouts succeeded but only ${run.orders} orders exist`);
+if (result.ok) {
+  console.log(`Invariants across the whole database: all ${result.rulesChecked} hold`);
+} else {
+  console.error("INVARIANT VIOLATIONS:", result.violations);
+}
+process.exit(result.ok && !missingOrders ? 0 : 1);
