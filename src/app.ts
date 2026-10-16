@@ -38,9 +38,22 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
   return result.data;
 }
 
+// express.json() reports client mistakes (bad JSON, oversized or unreadable
+// bodies) as errors with a 4xx status and a `type`; these are not server faults.
+function bodyParserError(err: unknown) {
+  const { status, type } = (err ?? {}) as { status?: unknown; type?: unknown };
+  if (typeof status !== "number" || status < 400 || status >= 500 || typeof type !== "string") return null;
+  if (type === "entity.parse.failed") {
+    return { status: 400, error: { code: "INVALID_JSON", message: "Malformed JSON body" } };
+  }
+  if (type === "entity.too.large") {
+    return { status: 413, error: { code: "PAYLOAD_TOO_LARGE", message: "Request body is too large" } };
+  }
+  return { status, error: { code: "UNREADABLE_BODY", message: "Request body could not be read" } };
+}
+
 export function createApp(db: Db, payments: PaymentProvider, authSecret: Uint8Array) {
   const app = express();
-  app.use(express.json({ limit: "10kb" }));
 
   const requireAuth = (role?: AuthUser["role"]) => async (req: Request, res: Response, next: NextFunction) => {
     const user = await verifyToken(authSecret, req.header("authorization"));
@@ -63,6 +76,9 @@ export function createApp(db: Db, payments: PaymentProvider, authSecret: Uint8Ar
     );
     next();
   });
+
+  // Registered after the request id so body errors carry one too.
+  app.use(express.json({ limit: "10kb" }));
 
   app.get("/health", async (_req, res) => {
     await db.query("SELECT 1");
@@ -107,9 +123,8 @@ export function createApp(db: Db, payments: PaymentProvider, authSecret: Uint8Ar
     if (err instanceof AppError) {
       return res.status(err.status).json({ error: { code: err.code, message: err.message, requestId } });
     }
-    if (err instanceof SyntaxError) {
-      return res.status(400).json({ error: { code: "INVALID_JSON", message: "Malformed JSON body", requestId } });
-    }
+    const bodyError = bodyParserError(err);
+    if (bodyError) return res.status(bodyError.status).json({ error: { ...bodyError.error, requestId } });
     logger.error({ err, requestId }, "unhandled error");
     res.status(500).json({ error: { code: "INTERNAL", message: "Something went wrong", requestId } });
   });

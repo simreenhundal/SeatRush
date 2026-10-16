@@ -115,6 +115,19 @@ describe("checkout", () => {
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
   });
 
+  it("scopes keys per user, so two buyers can use the same key and each pays", async () => {
+    const payments = scripted();
+    const a = await holdSeats(db, { eventId, userId: "ana", seatIds: [1] });
+    const b = await holdSeats(db, { eventId, userId: "ben", seatIds: [2] });
+    const ana = await checkout(db, payments, { holdId: a.id, userId: "ana", idempotencyKey: "checkout-1" });
+    const ben = await checkout(db, payments, { holdId: b.id, userId: "ben", idempotencyKey: "checkout-1" });
+
+    expect(ben.replayed).toBe(false);
+    expect(ben.order.chargeId).not.toBe(ana.order.chargeId);
+    expect(payments.chargesMade).toBe(2);
+    expect((await checkInvariants(db)).ok).toBe(true);
+  });
+
   it("keeps the hold after a decline so the buyer can retry with a new key", async () => {
     const payments = scripted("decline");
     const hold = await holdSeats(db, { eventId, userId: "ana", seatIds: [1] });

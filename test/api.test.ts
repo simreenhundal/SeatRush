@@ -82,8 +82,21 @@ describe("HTTP API", () => {
 
   it("handles malformed JSON and unknown routes", async () => {
     const bad = await request(app).post("/events").set("Content-Type", "application/json").send("{oops");
+    expect(bad.status).toBe(400);
     expect(bad.body.error.code).toBe("INVALID_JSON");
+    expect(bad.body.error.requestId).toBeTruthy();
+    expect(bad.headers["x-request-id"]).toBe(bad.body.error.requestId);
     expect((await request(app).get("/nope")).status).toBe(404);
+  });
+
+  it("rejects an oversized body with 413, not 500", async () => {
+    const res = await request(app)
+      .post("/events")
+      .set("Content-Type", "application/json")
+      .send(JSON.stringify({ name: "x".repeat(20_000) }));
+    expect(res.status).toBe(413);
+    expect(res.body.error.code).toBe("PAYLOAD_TOO_LARGE");
+    expect(res.body.error.requestId).toBeTruthy();
   });
 
   it("replaces an unsafe client request id instead of echoing it", async () => {
@@ -157,5 +170,20 @@ describe("auth", () => {
 
     const release = await request(app).post(`/holds/${hold.body.id}/release`).set("Authorization", ben);
     expect(release.status).toBe(404);
+  });
+
+  it("does not leak another user's order through an idempotent replay", async () => {
+    const eventId = await newEvent();
+    const hold = await holdAs("ana", eventId, [1]);
+    const checkoutAs = async (userId: string) =>
+      request(app)
+        .post(`/holds/${hold.body.id}/checkout`)
+        .set("Authorization", await bearer(userId))
+        .set("Idempotency-Key", "checkout-001");
+
+    expect((await checkoutAs("ana")).status).toBe(201);
+    const replay = await checkoutAs("ben");
+    expect(replay.status).toBe(404);
+    expect(replay.body.id).toBeUndefined();
   });
 });

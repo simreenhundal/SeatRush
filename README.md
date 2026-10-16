@@ -38,9 +38,9 @@ POST /holds ──► atomic seat claim ──► hold (5 min) ──► POST /h
 
 **Checkout state machine.** `active → paying → confirmed`, or `active → released | expired`. A declined payment returns the hold to `active` so the buyer can retry.
 
-**Idempotency.** `Idempotency-Key` is required on checkout. Retrying with the same key returns the original order or resumes an interrupted payment. The key is also passed to the payment provider, so the customer is charged at most once. If the provider times out, the hold stays in `paying` and a retry or the sweeper asks the provider what happened.
+**Idempotency.** `Idempotency-Key` is required on checkout and is scoped to the user, so two buyers can't collide or see each other's orders. Retrying with the same key returns the original order or resumes an interrupted payment. The key, prefixed with the hold id, is also passed to the payment provider, so the customer is charged at most once. If the provider times out, the hold stays in `paying` and a retry or the sweeper asks the provider what happened.
 
-**Constraints as the last line of defence.** Unique keys on `orders.hold_id` and `orders.idempotency_key`, and a CHECK that a seat's columns agree with its status, catch any bug the application code misses.
+**Constraints as the last line of defence.** Unique keys on `orders.hold_id` and `(orders.user_id, orders.idempotency_key)`, and a CHECK that a seat's columns agree with its status, catch any bug the application code misses.
 
 **Invariant checker.** After any load test, `npm run check` verifies no seat was oversold, every charge produced exactly one order, and every order was charged seats × price.
 
@@ -52,7 +52,7 @@ POST /holds ──► atomic seat claim ──► hold (5 min) ──► POST /h
 | GET | `/events/:id/seats` | Public | Seat map with live status |
 | POST | `/holds` | User | `{ eventId, seatIds }`. 409 if any seat is taken |
 | POST | `/holds/:id/release` | User | Give seats back. Only the hold's owner can release it |
-| POST | `/holds/:id/checkout` | User | Header `Idempotency-Key`. 201 new, 200 replay, 402 declined, 409 in progress, 410 expired, 503 payment pending |
+| POST | `/holds/:id/checkout` | User | Header `Idempotency-Key`. 201 new, 200 replay, 402 declined, 409 in progress, 410 expired, 422 key reused for another hold, 503 payment pending |
 | GET | `/health` | Public | Pings the database |
 
 Protected routes take `Authorization: Bearer <token>`, an HS256 JWT signed with `AUTH_SECRET` whose `sub` is the user id and `role` is `user` or `admin`. Missing, forged, expired or unsigned tokens get 401; a user calling an admin route gets 403. Another user's hold returns 404, so hold ids can't be probed.
@@ -83,16 +83,13 @@ export API_URL=http://localhost:3000
 
 docker compose up -d db          # Postgres on :5432, creates tickets and tickets_test
 npm install
-npm test                         # 39 tests, including race and auth tests
+npm test                         # 42 tests, including race and auth tests
 npm run bench                    # locking strategy benchmark
 npm start                        # API on :3000
 npm run race -- 3000 100         # spike test in another terminal, then checks invariants
 ```
 
 Or run everything in Docker: `docker compose up --build`.
-
-CI needs one repository secret, `CI_DB_PASSWORD`, for its throwaway Postgres service.
-
 ## Project layout
 
 ```

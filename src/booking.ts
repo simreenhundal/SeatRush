@@ -145,7 +145,7 @@ export async function checkout(
 ): Promise<{ order: Order; replayed: boolean }> {
   const { holdId, userId, idempotencyKey } = input;
 
-  const existing = await findOrderByKey(db, idempotencyKey);
+  const existing = await findOrderByKey(db, userId, idempotencyKey);
   if (existing) {
     if (existing.holdId !== holdId) {
       throw new AppError(422, "IDEMPOTENCY_KEY_REUSED", "Key was already used for a different hold");
@@ -193,7 +193,10 @@ export async function checkout(
 
   let result;
   try {
-    result = await payments.charge({ amountCents: start.amountCents!, idempotencyKey });
+    result = await payments.charge({
+      amountCents: start.amountCents!,
+      idempotencyKey: providerKey(holdId, idempotencyKey),
+    });
   } catch (err) {
     if (err instanceof PaymentTimeoutError) {
       // We don't know if the card was charged. Leave the hold in 'paying';
@@ -279,7 +282,7 @@ export async function sweep(db: Db, payments: PaymentProvider) {
   let recovered = 0;
   let released = 0;
   for (const hold of stuck) {
-    const charge = await payments.lookup(hold.checkout_key);
+    const charge = await payments.lookup(providerKey(hold.id, hold.checkout_key));
     const outcome = await withTx(db, async (tx) => {
       // Re-check under lock: a client retry may have resolved it meanwhile.
       const { rows } = await tx.query(
@@ -322,20 +325,26 @@ async function freeSeats(tx: Tx, holdIds: string[]) {
   );
 }
 
-async function findOrderByKey(db: Db | Tx, key: string) {
-  return mapOrder(db, "o.idempotency_key = $1", key);
+// Client keys are only unique per user, but the provider's keys are shared by
+// every buyer, so scope them to the hold before sending them out.
+function providerKey(holdId: string, idempotencyKey: string) {
+  return `${holdId}:${idempotencyKey}`;
+}
+
+async function findOrderByKey(db: Db | Tx, userId: string, key: string) {
+  return mapOrder(db, "o.user_id = $1 AND o.idempotency_key = $2", [userId, key]);
 }
 
 async function findOrderByHold(db: Db | Tx, holdId: string) {
-  return mapOrder(db, "o.hold_id = $1", holdId);
+  return mapOrder(db, "o.hold_id = $1", [holdId]);
 }
 
-async function mapOrder(db: Db | Tx, where: string, param: string): Promise<Order | null> {
+async function mapOrder(db: Db | Tx, where: string, params: string[]): Promise<Order | null> {
   const { rows } = await db.query(
     `SELECT o.*, array_agg(s.id ORDER BY s.id) AS seat_ids
      FROM orders o JOIN seats s ON s.hold_id = o.hold_id
      WHERE ${where} GROUP BY o.id`,
-    [param],
+    params,
   );
   if (rows.length === 0) return null;
   const r = rows[0];
