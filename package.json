@@ -1,0 +1,37 @@
+{
+  "name": "seatrush",
+  "version": "0.1.0",
+  "description": "Flash-sale ticketing backend that never oversells under concurrent load",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "migrate": "tsx src/migrate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx scripts/bench-strategies.ts",
+    "race": "tsx scripts/race.ts",
+    "check": "tsx scripts/check-invariants.ts"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
