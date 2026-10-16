@@ -21,7 +21,6 @@ async function statusOf(seatId: number) {
   return (await listSeats(db, eventId)).find((s) => s.id === seatId)!.status;
 }
 
-// A fake provider that returns the given outcomes in order, then succeeds.
 function scripted(...outcomes: ("success" | "decline" | "timeout")[]) {
   return new FakePaymentProvider(() => outcomes.shift() ?? "success");
 }
@@ -141,7 +140,6 @@ describe("checkout", () => {
       checkout(db, payments, { ...input, idempotencyKey: "key-0002" }),
     ).rejects.toMatchObject({ code: "CHECKOUT_IN_PROGRESS" });
 
-    // Retrying with the same key resumes and completes.
     const { order } = await checkout(db, payments, input);
     expect(order.seatIds).toEqual([1]);
     expect(payments.chargesMade).toBe(1);

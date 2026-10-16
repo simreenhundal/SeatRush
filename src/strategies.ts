@@ -1,14 +1,7 @@
 import type { Db } from "./db.js";
 
-/**
- * Four ways to claim a seat, isolated on a tiny table so they can be compared
- * fairly. The real booking code uses the atomic approach (plus row ordering).
- *
- *   naive        read, then write. Broken: two buyers can both win.
- *   atomic       one conditional UPDATE. The check and the write can't be split.
- *   pessimistic  lock the row with SELECT ... FOR UPDATE, then decide.
- *   optimistic   read a version number; the write only succeeds if it's unchanged.
- */
+// Isolated on a minimal table so the locking pattern is the only variable being
+// compared. "naive" is deliberately broken to demonstrate the race.
 export type Strategy = "naive" | "atomic" | "pessimistic" | "optimistic";
 export const STRATEGIES: Strategy[] = ["naive", "atomic", "pessimistic", "optimistic"];
 
@@ -19,7 +12,6 @@ export async function setupBenchTable(db: Db, seatCount: number) {
   await db.query("INSERT INTO bench_seats (id) SELECT generate_series(1, $1)", [seatCount]);
 }
 
-/** Returns true if this buyer believes they got the seat. */
 export async function claim(db: Db, strategy: Strategy, seatId: number, buyer: string): Promise<boolean> {
   switch (strategy) {
     case "naive": {

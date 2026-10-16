@@ -9,21 +9,27 @@ export function createPool(connectionString = process.env.DATABASE_URL, max = 20
 }
 
 /**
- * Run `fn` inside a transaction. Commits on success, rolls back on any error.
- * Every multi-step write in this project goes through here, so a failure
- * halfway through never leaves half-written state behind.
+ * Every multi-step write goes through here, so a failure halfway through never
+ * leaves half-written state behind.
  */
 export async function withTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> {
   const client = await db.connect();
+  let broken = false;
   try {
     await client.query("BEGIN");
     const result = await fn(client);
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // A connection that can't roll back is unusable; destroy it instead of
+      // returning it to the pool. The original error is the one worth reporting.
+      broken = true;
+    }
     throw err;
   } finally {
-    client.release();
+    client.release(broken);
   }
 }

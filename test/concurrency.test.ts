@@ -5,9 +5,6 @@ import { checkInvariants } from "../src/invariants.js";
 import { FakePaymentProvider } from "../src/payments.js";
 import { allSettled, resetDb, setupDb } from "./helpers.js";
 
-// These tests fire many requests at the same rows at the same moment,
-// through a real Postgres connection pool, and check nothing breaks.
-
 let db: Db;
 let eventId: number;
 
@@ -31,7 +28,6 @@ describe("race conditions", () => {
   });
 
   it("overlapping multi-seat holds never deadlock or double-hold", async () => {
-    // 150 buyers each grab 2-4 random seats out of the first 10.
     // Without consistent lock ordering, this reliably deadlocks.
     const { ok, errors } = await allSettled(150, (i) => {
       const seats = new Set<number>();
@@ -42,7 +38,7 @@ describe("race conditions", () => {
 
     expect(errors.every((e) => e.code === "SEATS_UNAVAILABLE")).toBe(true); // no deadlocks, no 500s
     const heldBySuccessfulHolds = ok.flatMap((h) => h.seatIds);
-    expect(new Set(heldBySuccessfulHolds).size).toBe(heldBySuccessfulHolds.length); // no seat twice
+    expect(new Set(heldBySuccessfulHolds).size).toBe(heldBySuccessfulHolds.length);
     const { rows } = await db.query("SELECT count(*)::int AS n FROM seats WHERE status = 'held'");
     expect(rows[0].n).toBe(heldBySuccessfulHolds.length);
   });
@@ -55,7 +51,7 @@ describe("race conditions", () => {
     );
 
     expect(errors).toEqual([]);
-    expect(new Set(ok.map((r) => r.order.id)).size).toBe(1); // everyone sees the same order
+    expect(new Set(ok.map((r) => r.order.id)).size).toBe(1);
     expect(payments.chargesMade).toBe(1);
     expect((await checkInvariants(db)).ok).toBe(true);
   });
@@ -75,7 +71,6 @@ describe("race conditions", () => {
 
 describe("flash sale simulation", () => {
   it("500 buyers, 50 seats, flaky payments: invariants hold", async () => {
-    // 15% of charges decline and 5% time out after charging.
     const payments = FakePaymentProvider.random({ declineRate: 0.15, timeoutRate: 0.05, latencyMs: 5 });
 
     await allSettled(500, async (i) => {
@@ -96,7 +91,6 @@ describe("flash sale simulation", () => {
 
     const result = await checkInvariants(db);
     expect(result.violations).toEqual([]);
-    // Every charge the provider made turned into exactly one order.
     expect(result.stats.orders).toBe(payments.chargesMade);
     expect(result.stats.sold_seats).toBeLessThanOrEqual(50);
   });

@@ -9,14 +9,14 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
           POSTGRES_DB: tickets_test
         options: >-
           --health-cmd pg_isready --health-interval 2s --health-retries 15
         ports: ["5432:5432"]
     env:
-      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/tickets_test
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tickets_test
+      TEST_DATABASE_URL: postgres://postgres:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/tickets_test
+      DATABASE_URL: postgres://postgres:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/tickets_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

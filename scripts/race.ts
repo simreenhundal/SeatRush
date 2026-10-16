@@ -1,17 +1,12 @@
-/**
- * Spike test over HTTP against a running server. Simulates a ticket drop:
- * thousands of buyers fire at once, most fighting over the best seats.
- *
- *   npm start                        # in one terminal
- *   npm run race -- 5000 100         # buyers, seats
- *
- * Each buyer holds 1-2 seats (70% aim at the front row), then checks out.
- * Prints latency percentiles and then verifies the database invariants.
- */
+// Spike test over HTTP against a running server, followed by an invariant check.
+// Usage: npm run race -- <buyers> <seats>
+import { loadAuthSecret, signToken } from "../src/auth.js";
 import { createPool } from "../src/db.js";
 import { checkInvariants } from "../src/invariants.js";
 
-const BASE = process.env.API_URL ?? "http://localhost:3000";
+const BASE = process.env.API_URL;
+if (!BASE) throw new Error("API_URL is not set");
+const authSecret = loadAuthSecret();
 const buyers = Number(process.argv[2] ?? 2000);
 const seatCount = Number(process.argv[3] ?? 100);
 const CONCURRENCY = Number(process.env.CONCURRENCY ?? 200);
@@ -27,7 +22,13 @@ async function post(path: string, body: unknown, headers: Record<string, string>
   return { status: res.status, json, ms: performance.now() - start };
 }
 
-const event = await post("/events", { name: "Spike Test", priceCents: 12000, seatCount });
+const adminToken = await signToken(authSecret, "race-admin", "admin");
+const event = await post("/events", { name: "Spike Test", priceCents: 12000, seatCount }, {
+  authorization: `Bearer ${adminToken}`,
+});
+if (event.status !== 201) {
+  throw new Error(`Could not create event (${event.status}): ${JSON.stringify(event.json)}`);
+}
 const eventId = event.json.id;
 const firstSeat = Number((await (await fetch(`${BASE}/events/${eventId}/seats`)).json()).seats[0].id);
 
@@ -39,25 +40,27 @@ async function buyer(i: number) {
   const pool = Math.random() < 0.7 ? Math.min(20, seatCount) : seatCount; // front row is popular
   const n = 1 + (i % 2);
   const seatIds = Array.from({ length: n }, () => firstSeat + Math.floor(Math.random() * pool));
-  const hold = await post("/holds", { eventId, seatIds }, { "x-user-id": `buyer-${i}` });
+  const authorization = `Bearer ${await signToken(authSecret, `buyer-${i}`)}`;
+
+  const hold = await post("/holds", { eventId, seatIds }, { authorization });
   latencies.push(hold.ms);
   if (hold.status !== 201) return count(`hold ${hold.status} ${hold.json?.error?.code ?? ""}`.trim());
   count("hold 201");
 
   const pay = await post(`/holds/${hold.json.id}/checkout`, {}, {
-    "x-user-id": `buyer-${i}`,
+    authorization,
     "idempotency-key": `race-${eventId}-${i}`,
   });
   latencies.push(pay.ms);
   count(`checkout ${pay.status} ${pay.json?.error?.code ?? ""}`.trim());
 }
 
-// Run buyers with a fixed number in flight at once.
 const start = performance.now();
 let next = 0;
 await Promise.all(
   Array.from({ length: CONCURRENCY }, async () => {
-    while (next < buyers) await buyer(next++).catch(() => count("network error"));
+    // A failed request is part of the result under load, so record it and keep going.
+    while (next < buyers) await buyer(next++).catch((err) => count(`client error ${err.cause?.code ?? err.name}`));
   }),
 );
 const seconds = (performance.now() - start) / 1000;

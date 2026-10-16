@@ -3,8 +3,8 @@ import { withTx, type Db, type Tx } from "./db.js";
 import { AppError, conflict, notFound } from "./errors.js";
 import { PaymentTimeoutError, type PaymentProvider } from "./payments.js";
 
-export const HOLD_SECONDS = 300; // a hold lasts 5 minutes
-export const PAYMENT_WINDOW_SECONDS = 60; // seats stay locked this long while paying
+export const HOLD_SECONDS = 300;
+export const PAYMENT_WINDOW_SECONDS = 60;
 export const MAX_SEATS_PER_HOLD = 8;
 
 export interface Hold {
@@ -25,14 +25,9 @@ export interface Order {
   seatIds: number[];
 }
 
-// A seat can be claimed if it is free, or held by a hold whose time ran out.
-// Expiry is therefore enforced by the query itself, so correctness never
+// Expiry is enforced inside the claim query itself, so correctness never
 // depends on a background job running on time.
 const CLAIMABLE = `(status = 'available' OR (status = 'held' AND held_until < now()))`;
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
 
 export async function createEvent(
   db: Db,
@@ -44,7 +39,6 @@ export async function createEvent(
       [input.name, input.priceCents],
     );
     const eventId = Number(rows[0].id);
-    // Seats are labelled in rows of 20: A1..A20, B1..B20, ...
     await tx.query(
       `INSERT INTO seats (event_id, label)
        SELECT $1, chr(65 + ((n - 1) / 20)::int) || ((n - 1) % 20 + 1)
@@ -65,13 +59,7 @@ export async function listSeats(db: Db, eventId: number) {
   return rows.map((r) => ({ id: Number(r.id), label: r.label, status: r.status }));
 }
 
-// ---------------------------------------------------------------------------
-// Holds
-// ---------------------------------------------------------------------------
-
 /**
- * Hold a set of seats for one user, all or nothing.
- *
  * The race this solves: two buyers click the same seat at the same moment.
  * A "check, then update" approach lets both pass the check before either
  * writes, and the seat sells twice. Here the check and the claim are the same
@@ -97,11 +85,9 @@ export async function holdSeats(
     );
     const expiresAt: Date = holdRows[0].expires_at;
 
-    // Lock the requested seats in id order, then claim them in one statement.
-    // - FOR UPDATE inside the subquery locks rows in a consistent order, so two
-    //   buyers wanting overlapping seats wait on each other instead of deadlocking.
-    // - If a row changed while we waited for its lock, Postgres re-checks the
-    //   WHERE clause against the new version and skips it if it's no longer claimable.
+    // Locking in id order makes buyers with overlapping seats queue instead of
+    // deadlocking. If a row changed while we waited for its lock, Postgres
+    // re-checks the WHERE clause against the new version and skips it.
     const { rows } = await tx.query<{ id: string }>(
       `UPDATE seats SET status = 'held', hold_id = $1, held_until = $2
        WHERE id IN (
@@ -114,7 +100,7 @@ export async function holdSeats(
       [holdId, expiresAt, input.eventId, seatIds],
     );
 
-    // All or nothing: if we didn't get every seat, roll back the whole hold.
+    // A partial hold would strand seats the buyer can't use, so roll back entirely.
     if (rows.length !== seatIds.length) {
       throw conflict("SEATS_UNAVAILABLE", "One or more seats are no longer available");
     }
@@ -141,13 +127,7 @@ export async function releaseHold(db: Db, holdId: string, userId: string) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Checkout
-// ---------------------------------------------------------------------------
-
 /**
- * Pay for a hold and turn its seats into sold seats.
- *
  * Runs in three phases so the slow network call to the payment provider
  * never happens while database locks are held:
  *   1. Short transaction: validate the hold, move it to 'paying', extend its seats.
@@ -165,7 +145,6 @@ export async function checkout(
 ): Promise<{ order: Order; replayed: boolean }> {
   const { holdId, userId, idempotencyKey } = input;
 
-  // Fast path: this exact request already succeeded.
   const existing = await findOrderByKey(db, idempotencyKey);
   if (existing) {
     if (existing.holdId !== holdId) {
@@ -174,7 +153,6 @@ export async function checkout(
     return { order: existing, replayed: true };
   }
 
-  // Phase 1
   const start = await withTx(db, async (tx) => {
     const hold = await lockHold(tx, holdId, userId);
 
@@ -213,7 +191,6 @@ export async function checkout(
   });
   if ("done" in start && start.done) return { order: start.done, replayed: true };
 
-  // Phase 2
   let result;
   try {
     result = await payments.charge({ amountCents: start.amountCents!, idempotencyKey });
@@ -226,7 +203,6 @@ export async function checkout(
     throw err;
   }
 
-  // Phase 3
   if (!result.ok) {
     await withTx(db, async (tx) => {
       const hold = await lockHold(tx, holdId, userId);
@@ -243,7 +219,7 @@ export async function checkout(
   return { order, replayed: false };
 }
 
-/** Phase 3 on success. Safe to call twice: the second call returns the existing order. */
+/** Safe to call twice, because a client retry and the sweeper can race to confirm the same hold. */
 async function confirmHold(
   tx: Tx,
   holdId: string,
@@ -281,13 +257,9 @@ async function confirmHold(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Sweeper
-// ---------------------------------------------------------------------------
-
 /**
- * Background cleanup. Correctness doesn't depend on it, since expired seats are
- * claimable anyway, but it keeps state tidy and resolves stuck payments.
+ * Correctness doesn't depend on this, since expired seats are claimable anyway,
+ * but it keeps state tidy and resolves payments that were never retried.
  */
 export async function sweep(db: Db, payments: PaymentProvider) {
   const expired = await withTx(db, async (tx) => {
@@ -301,7 +273,6 @@ export async function sweep(db: Db, payments: PaymentProvider) {
     return ids.length;
   });
 
-  // Holds stuck in 'paying' past their window: ask the provider what happened.
   const { rows: stuck } = await db.query(
     "SELECT id, checkout_key FROM holds WHERE status = 'paying' AND expires_at < now()",
   );
@@ -335,10 +306,6 @@ export async function sweep(db: Db, payments: PaymentProvider) {
   }
   return { expired, recovered, released };
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 async function lockHold(tx: Tx, holdId: string, userId: string) {
   const { rows } = await tx.query("SELECT * FROM holds WHERE id = $1 FOR UPDATE", [holdId]);

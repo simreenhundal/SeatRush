@@ -2,7 +2,7 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: tickets
     command: ["postgres", "-c", "max_connections=300"]
     ports: ["5432:5432"]
@@ -18,7 +18,8 @@ services:
     depends_on:
       db: { condition: service_healthy }
     environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/tickets
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/tickets
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET to at least 32 characters}
       DB_POOL_SIZE: "40"
       PAYMENT_DECLINE_RATE: "0.1"
       PAYMENT_LATENCY_MS: "50"

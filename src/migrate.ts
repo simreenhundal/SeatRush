@@ -5,7 +5,6 @@ import { createPool, type Db } from "./db.js";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta.url));
 
-/** Applies each .sql file in /migrations once, in filename order. */
 export async function migrate(db: Db): Promise<string[]> {
   await db.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);

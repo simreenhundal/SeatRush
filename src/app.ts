@@ -2,6 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { randomUUID } from "node:crypto";
 import pino from "pino";
 import { z } from "zod";
+import { verifyToken, type AuthUser } from "./auth.js";
 import { checkout, createEvent, holdSeats, listSeats, MAX_SEATS_PER_HOLD, releaseHold } from "./booking.js";
 import type { Db } from "./db.js";
 import { AppError } from "./errors.js";
@@ -20,12 +21,12 @@ const HoldBody = z.object({
 });
 const IdParam = z.coerce.number().int().positive();
 const UuidParam = z.uuid();
-// Stand-in for real auth: the caller identifies themselves with a header.
-const UserId = z.string().min(1).max(100);
 const IdempotencyKey = z.string().min(8).max(200);
+// Client-supplied ids end up in logs and response headers, so only safe characters pass.
+const RequestId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
 
-function userId(req: Request) {
-  return parse(UserId, req.header("x-user-id"), "X-User-Id header");
+function currentUser(res: Response): AuthUser {
+  return res.locals.user;
 }
 
 function parse<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
@@ -37,13 +38,20 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
   return result.data;
 }
 
-export function createApp(db: Db, payments: PaymentProvider) {
+export function createApp(db: Db, payments: PaymentProvider, authSecret: Uint8Array) {
   const app = express();
   app.use(express.json({ limit: "10kb" }));
 
-  // Every request gets an id that appears in its logs and its error responses.
+  const requireAuth = (role?: AuthUser["role"]) => async (req: Request, res: Response, next: NextFunction) => {
+    const user = await verifyToken(authSecret, req.header("authorization"));
+    if (role && user.role !== role) throw new AppError(403, "FORBIDDEN", `Requires ${role} role`);
+    res.locals.user = user;
+    next();
+  };
+
   app.use((req, res, next) => {
-    const id = req.header("x-request-id") ?? randomUUID();
+    const supplied = RequestId.safeParse(req.header("x-request-id"));
+    const id = supplied.success ? supplied.data : randomUUID();
     res.locals.requestId = id;
     res.setHeader("x-request-id", id);
     const start = performance.now();
@@ -61,7 +69,7 @@ export function createApp(db: Db, payments: PaymentProvider) {
     res.json({ ok: true });
   });
 
-  app.post("/events", async (req, res) => {
+  app.post("/events", requireAuth("admin"), async (req, res) => {
     const body = parse(CreateEventBody, req.body, "body");
     res.status(201).json(await createEvent(db, body));
   });
@@ -71,22 +79,22 @@ export function createApp(db: Db, payments: PaymentProvider) {
     res.json({ eventId, seats: await listSeats(db, eventId) });
   });
 
-  app.post("/holds", async (req, res) => {
+  app.post("/holds", requireAuth(), async (req, res) => {
     const body = parse(HoldBody, req.body, "body");
-    const hold = await holdSeats(db, { ...body, userId: userId(req) });
+    const hold = await holdSeats(db, { ...body, userId: currentUser(res).id });
     res.status(201).json(hold);
   });
 
-  app.post("/holds/:id/release", async (req, res) => {
-    await releaseHold(db, parse(UuidParam, req.params.id, "id"), userId(req));
+  app.post("/holds/:id/release", requireAuth(), async (req, res) => {
+    await releaseHold(db, parse(UuidParam, req.params.id, "id"), currentUser(res).id);
     res.status(204).end();
   });
 
-  app.post("/holds/:id/checkout", async (req, res) => {
+  app.post("/holds/:id/checkout", requireAuth(), async (req, res) => {
     const idempotencyKey = parse(IdempotencyKey, req.header("idempotency-key"), "Idempotency-Key header");
     const { order, replayed } = await checkout(db, payments, {
       holdId: parse(UuidParam, req.params.id, "id"),
-      userId: userId(req),
+      userId: currentUser(res).id,
       idempotencyKey,
     });
     res.status(replayed ? 200 : 201).json(order);
@@ -94,7 +102,6 @@ export function createApp(db: Db, payments: PaymentProvider) {
 
   app.use((_req, _res, next) => next(new AppError(404, "NOT_FOUND", "Route not found")));
 
-  // One error shape for every failure: { error: { code, message, requestId } }
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const requestId = res.locals.requestId;
     if (err instanceof AppError) {

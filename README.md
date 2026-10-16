@@ -4,7 +4,7 @@ A flash-sale ticketing backend that never oversells, even when thousands of buye
 
 When tickets for a popular show drop, naive systems sell the same seat twice, deadlock, or charge customers for seats they didn't get. SeatRush handles the hard parts: concurrent seat claims, holds that expire, checkout that's safe to retry, and payments that time out mid-flight.
 
-**Stack:** TypeScript · Node.js · Express · PostgreSQL (raw SQL with `pg`) · Zod · Vitest · Supertest · k6 · Docker · GitHub Actions
+**Stack:** TypeScript · Node.js · Express · PostgreSQL (raw SQL with `pg`) · JWT auth (`jose`) · Zod · Vitest · Supertest · Docker · GitHub Actions
 
 ## Results
 
@@ -46,35 +46,52 @@ POST /holds ──► atomic seat claim ──► hold (5 min) ──► POST /h
 
 ## API
 
-| Method | Path | Notes |
-| --- | --- | --- |
-| POST | `/events` | `{ name, priceCents, seatCount }` |
-| GET | `/events/:id/seats` | Seat map with live status |
-| POST | `/holds` | `{ eventId, seatIds }`, header `X-User-Id`. 409 if any seat is taken |
-| POST | `/holds/:id/release` | Give seats back |
-| POST | `/holds/:id/checkout` | Headers `X-User-Id`, `Idempotency-Key`. 201 new, 200 replay, 402 declined, 409 in progress, 410 expired, 503 payment pending |
-| GET | `/health` | Pings the database |
+| Method | Path | Auth | Notes |
+| --- | --- | --- | --- |
+| POST | `/events` | Admin | `{ name, priceCents, seatCount }` |
+| GET | `/events/:id/seats` | Public | Seat map with live status |
+| POST | `/holds` | User | `{ eventId, seatIds }`. 409 if any seat is taken |
+| POST | `/holds/:id/release` | User | Give seats back. Only the hold's owner can release it |
+| POST | `/holds/:id/checkout` | User | Header `Idempotency-Key`. 201 new, 200 replay, 402 declined, 409 in progress, 410 expired, 503 payment pending |
+| GET | `/health` | Public | Pings the database |
+
+Protected routes take `Authorization: Bearer <token>`, an HS256 JWT signed with `AUTH_SECRET` whose `sub` is the user id and `role` is `user` or `admin`. Missing, forged, expired or unsigned tokens get 401; a user calling an admin route gets 403. Another user's hold returns 404, so hold ids can't be probed.
+
+The API verifies tokens but doesn't issue them; that belongs to a separate login service. `signToken` in `src/auth.ts` creates tokens for tests and the spike test.
 
 Errors share one shape: `{ "error": { "code", "message", "requestId" } }`.
 
-`X-User-Id` stands in for real authentication to keep the focus on concurrency.
-
 ## Running it
 
-```bash
-docker compose up -d db          # Postgres on :5432 (creates tickets and tickets_test)
-npm install
-npm test                         # 32 tests, including the race tests
-npm run bench                    # strategy benchmark (needs DATABASE_URL)
+All configuration comes from environment variables; nothing has a default that points at a real service.
 
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/tickets
+| Variable | Used by | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | server, bench, race, check | |
+| `TEST_DATABASE_URL` | tests | Database name must contain `test`, since tests truncate every table |
+| `AUTH_SECRET` | server, race | At least 32 characters; the server refuses to start otherwise |
+| `API_URL` | race | Base URL of the running API |
+| `POSTGRES_PASSWORD` | Docker Compose | |
+| `PAYMENT_DECLINE_RATE`, `PAYMENT_TIMEOUT_RATE`, `PAYMENT_LATENCY_MS` | server | Make the fake payment provider flaky |
+
+```bash
+export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+export AUTH_SECRET=$(openssl rand -hex 32)
+export DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets
+export TEST_DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/tickets_test
+export API_URL=http://localhost:3000
+
+docker compose up -d db          # Postgres on :5432, creates tickets and tickets_test
+npm install
+npm test                         # 39 tests, including race and auth tests
+npm run bench                    # locking strategy benchmark
 npm start                        # API on :3000
 npm run race -- 3000 100         # spike test in another terminal, then checks invariants
 ```
 
 Or run everything in Docker: `docker compose up --build`.
 
-Make the fake payment provider flaky with `PAYMENT_DECLINE_RATE`, `PAYMENT_TIMEOUT_RATE` and `PAYMENT_LATENCY_MS`.
+CI needs one repository secret, `CI_DB_PASSWORD`, for its throwaway Postgres service.
 
 ## Project layout
 
@@ -84,14 +101,14 @@ src/booking.ts            holds, checkout, sweeper (the core)
 src/strategies.ts         the four locking strategies, isolated for comparison
 src/invariants.ts         business rules checked after load tests
 src/payments.ts           idempotent fake payment provider
-src/app.ts                Express routes, validation, error handling
-test/                     unit, API, concurrency and strategy tests
-scripts/                  benchmark, HTTP spike test, k6 script, invariant checker
+src/app.ts                Express routes, auth checks, validation, error handling
+src/auth.ts               JWT signing and verification
+test/                     unit, API, auth, concurrency and strategy tests
+scripts/                  benchmark, HTTP spike test, invariant checker
 ```
 
 ## What's next
 
 - Move hot inventory into Redis with atomic Lua scripts, with Postgres as the source of truth
 - Virtual waiting room that admits buyers at a controlled rate with signed tokens
-- Real authentication in place of `X-User-Id`
 - Connection pooling with PgBouncer, then re-run the spike test to measure the gain

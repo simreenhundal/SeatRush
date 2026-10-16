@@ -1,15 +1,5 @@
-/**
- * Benchmarks the four seat-claiming strategies against a real Postgres.
- *
- *   npm run bench
- *
- * Two scenarios per strategy:
- *   hot seat   300 buyers all want seat 1 (worst-case contention)
- *   spread     3000 claims across 500 seats (realistic mix)
- *
- * "Oversold" counts buyers who were told they won a seat that ended up
- * belonging to someone else. Anything above 0 is a real-world double sale.
- */
+// "Oversold" counts buyers who were told they won a seat that ended up
+// belonging to someone else. Anything above 0 is a real-world double sale.
 import { createPool } from "../src/db.js";
 import { claim, setupBenchTable, STRATEGIES, type Strategy } from "../src/strategies.js";
 
@@ -21,7 +11,7 @@ async function run(strategy: Strategy, seats: number, attempts: number) {
   const results = await Promise.all(
     Array.from({ length: attempts }, (_, i) => {
       const seat = seats === 1 ? 1 : 1 + Math.floor(Math.random() * seats);
-      return claim(db, strategy, seat, `buyer-${i}`).catch(() => false);
+      return claim(db, strategy, seat, `buyer-${i}`);
     }),
   );
   const ms = performance.now() - start;

@@ -1,10 +1,4 @@
-/**
- * Checks the database for oversold seats, double charges and orphaned state.
- *
- *   npm run check
- *
- * Exits non-zero on any violation, so it can gate CI or follow a load test.
- */
+// Exits non-zero on any violation so it can gate CI or follow a load test.
 import { createPool } from "../src/db.js";
 import { checkInvariants } from "../src/invariants.js";
 
